@@ -1,4 +1,4 @@
-name: RDP
+name: google-usa
 
 on:
   workflow_dispatch:

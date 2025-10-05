@@ -1,113 +1,27 @@
-name: google-usa
+name: Window 10
 
-on:
-  workflow_dispatch:
+on: [push, workflow_dispatch]
 
 jobs:
-  secure-rdp:
+  build:
+
     runs-on: windows-latest
-    timeout-minutes: 3600
+    timeout-minutes: 9999
+
 
     steps:
-      - name: Configure Core RDP Settings
-        run: |
-          # Aktifkan Remote Desktop dan nonaktifkan Network Level Authentication (NLA)
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' `
-                             -Name "fDenyTSConnections" -Value 0 -Force
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
-                             -Name "UserAuthentication" -Value 0 -Force
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
-                             -Name "SecurityLayer" -Value 0 -Force
-
-          # Hapus aturan firewall yang lama jika ada, lalu buat aturan baru untuk port 3389
-          netsh advfirewall firewall delete rule name="RDP-Tailscale"
-          netsh advfirewall firewall add rule name="RDP-Tailscale" `
-            dir=in action=allow protocol=TCP localport=3389
-
-          # Restart service Remote Desktop agar perubahan diterapkan
-          Restart-Service -Name TermService -Force
-
-      - name: Create RDP User with Secure Password
-        run: |
-          Add-Type -AssemblyName System.Security
-          $charSet = @{
-              Upper   = [char[]](65..90)      # A-Z
-              Lower   = [char[]](97..122)     # a-z
-              Number  = [char[]](48..57)      # 0-9
-              Special = ([char[]](33..47) + [char[]](58..64) +
-                         [char[]](91..96) + [char[]](123..126)) # Karakter spesial
-          }
-          $rawPassword = @()
-          $rawPassword += $charSet.Upper | Get-Random -Count 4
-          $rawPassword += $charSet.Lower | Get-Random -Count 4
-          $rawPassword += $charSet.Number | Get-Random -Count 4
-          $rawPassword += $charSet.Special | Get-Random -Count 4
-          $password = -join ($rawPassword | Sort-Object { Get-Random })
-          $securePass = ConvertTo-SecureString $password -AsPlainText -Force
-
-          # Buat user baru dan tambahkan ke grup Administrator dan Remote Desktop Users
-          New-LocalUser -Name "Yanzz" -Password $securePass -AccountNeverExpires
-          Add-LocalGroupMember -Group "Administrators" -Member "Yanzz"
-          Add-LocalGroupMember -Group "Remote Desktop Users" -Member "Yanzz"
-
-          echo "RDP_CREDS=User: Yanzz | Password: $password" >> $env:GITHUB_ENV
-
-          if (-not (Get-LocalUser -Name "Yanzz")) {
-              Write-Error "Gagal membuat user RDP"
-              exit 1
-          }
-
-      - name: Install Tailscale
-        run: |
-          $tsUrl = "https://pkgs.tailscale.com/stable/tailscale-setup-1.82.0-amd64.msi"
-          $installerPath = "$env:TEMP\tailscale.msi"
-
-          Invoke-WebRequest -Uri $tsUrl -OutFile $installerPath
-          Start-Process msiexec.exe -ArgumentList "/i", "`"$installerPath`"", "/quiet", "/norestart" -Wait
-          Remove-Item $installerPath -Force
-
-      - name: Establish Tailscale Connection
-        run: |
-          # Jalankan tailscale up dengan auth key yang disimpan di secrets repo
-          & "$env:ProgramFiles\Tailscale\tailscale.exe" up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=gh-runner-$env:GITHUB_RUN_ID
-
-          # Tunggu hingga IP Tailscale didapatkan
-          $tsIP = $null
-          $retries = 0
-          while (-not $tsIP -and $retries -lt 10) {
-              $tsIP = & "$env:ProgramFiles\Tailscale\tailscale.exe" ip -4
-              Start-Sleep -Seconds 5
-              $retries++
-          }
-
-          if (-not $tsIP) {
-              Write-Error "Gagal mendapatkan IP Tailscale, keluar."
-              exit 1
-          }
-          echo "TAILSCALE_IP=$tsIP" >> $env:GITHUB_ENV
-
-      - name: Verify RDP Accessibility
-        run: |
-          Write-Host "IP Tailscale: $env:TAILSCALE_IP"
-
-          # Cek koneksi ke port RDP 3389 via Tailscale IP
-          $testResult = Test-NetConnection -ComputerName $env:TAILSCALE_IP -Port 3389
-          if (-not $testResult.TcpTestSucceeded) {
-              Write-Error "Gagal terhubung ke port RDP 3389"
-              exit 1
-          }
-          Write-Host "Koneksi TCP berhasil!"
-
-      - name: Maintain Connection
-        run: |
-          Write-Host "`n=== INFO AKSES RDP ==="
-          Write-Host "Alamat: $env:TAILSCALE_IP"
-          Write-Host "Username: Yanzz"
-          Write-Host "Password: $(echo $env:RDP_CREDS)"
-          Write-Host "======================`n"
-
-          # Loop agar runner tetap aktif dan akses RDP tetap terbuka
-          while ($true) {
-              Write-Host "[$(Get-Date)] RDP masih aktif. Ctrl+C untuk berhenti."
-              Start-Sleep -Seconds 300
-          }
+    - name: Download
+      run: Invoke-WebRequest https://bin.equinox.io/c/4VmDzA7iaHb/ngrok-stable-windows-amd64.zip -OutFile ngrok.zip
+    - name: Extract
+      run: Expand-Archive ngrok.zip
+    - name: Auth
+      run: .\ngrok\ngrok.exe authtoken $Env:NGROK_AUTH_TOKEN
+      env:
+        NGROK_AUTH_TOKEN: ${{ secrets.NGROK_AUTH_TOKEN }}
+    - name: Enable TS
+      run: Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server'-name "fDenyTSConnections" -Value 0
+    - run: Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
+    - run: Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -name "UserAuthentication" -Value 1
+    - run: Set-LocalUser -Name "runneradmin" -Password (ConvertTo-SecureString -AsPlainText "@cyb3rking" -Force)
+    - name: Create Tunnel
+      run: .\ngrok\ngrok.exe tcp 3389
